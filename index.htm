@@ -6,6 +6,7 @@
     <title>Monitor de Temperatura y Humedad</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/gauge.js/1.3.7/gauge.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -76,18 +77,36 @@
         button:hover {
             background-color: #444;
         }
+        .debug-panel {
+            background-color: #1e1e1e;
+            border: 1px solid #333;
+            border-radius: 5px;
+            padding: 10px;
+            margin-top: 20px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            height: 100px;
+            overflow-y: auto;
+            color: #4CAF50;
+        }
     </style>
 </head>
 <body>
     <h1>Monitor de Temperatura y Humedad en Tiempo Real</h1>
 
     <div class="settings">
-        <label for="wsUrl">URL del WebSocket:</label>
-        <input type="text" id="wsUrl" value="wss://280b4923bd19408a8100f249fb7b2fdb.s1.eu.hivemq.cloud:8884/mqtt" style="width: 300px;">
-        <label for="wsUsername">Usuario:</label>
-        <input type="text" id="wsUsername" value="tu_usuario" style="width: 300px;">
-        <label for="wsPassword">Contraseña:</label>
-        <input type="password" id="wsPassword" value="tu_contraseña" style="width: 300px;">
+        <label for="host">Host MQTT:</label>
+        <input type="text" id="host" value="280b4923bd19408a8100f249fb7b2fdb.s1.eu.hivemq.cloud" style="width: 300px;">
+        <label for="port">Puerto:</label>
+        <input type="text" id="port" value="8884" style="width: 100px;">
+        <label for="username">Usuario:</label>
+        <input type="text" id="username" value="tu_usuario" style="width: 150px;">
+        <label for="password">Contraseña:</label>
+        <input type="password" id="password" value="tu_contraseña" style="width: 150px;">
+        <label for="tempTopic">Tema Temperatura:</label>
+        <input type="text" id="tempTopic" value="sensores/temperatura" style="width: 150px;">
+        <label for="humTopic">Tema Humedad:</label>
+        <input type="text" id="humTopic" value="sensores/humedad" style="width: 150px;">
         <button id="connectBtn">Conectar</button>
     </div>
 
@@ -119,9 +138,11 @@
         </div>
     </div>
 
+    <div class="debug-panel" id="debugPanel">Logs de depuración...</div>
+
     <script>
         // Variables globales
-        let ws;
+        let client;
         let temperatureGaugeChart;
         let humidityGaugeChart;
         let temperatureLineChart;
@@ -129,6 +150,14 @@
         let temperatureHistory = [];
         let humidityHistory = [];
         const maxDataPoints = 30;
+        let isConnected = false;
+
+        // Función para añadir mensajes de depuración
+        function logDebug(message) {
+            const debugPanel = document.getElementById('debugPanel');
+            const timestamp = new Date().toLocaleTimeString();
+            debugPanel.textContent = `[${timestamp}] ${message}\n` + debugPanel.textContent;
+        }
 
         // Inicializar gráficos
         function initGauge(canvasId, opts) {
@@ -186,65 +215,168 @@
             });
         }
 
-        // Conectar WebSocket
-        function connectWebSocket(url, username, password) {
-            if (ws) {
-                ws.close();
+        // Conectar MQTT con la biblioteca Paho
+        function connectMQTT(host, port, username, password, tempTopic, humTopic) {
+            if (isConnected && client) {
+                client.disconnect();
+                isConnected = false;
+                logDebug("Desconectando cliente anterior...");
             }
 
             try {
-                ws = new WebSocket(url, ['mqtt', username, password]);
+                const clientId = "dashboard_" + Math.random().toString(16).substr(2, 8);
+                client = new Paho.MQTT.Client(host, Number(port), clientId);
 
-                ws.onopen = function() {
-                    const statusEl = document.getElementById('connectionStatus');
-                    statusEl.textContent = 'Conectado';
-                    statusEl.classList.remove('disconnected');
-                    statusEl.classList.add('connected');
+                // Establecer callbacks
+                client.onConnectionLost = onConnectionLost;
+                client.onMessageArrived = onMessageArrived;
 
-                    // Suscribirse a los temas
-                    ws.send(JSON.stringify({
-                        action: 'subscribe',
-                        topics: ['sensores/temperatura', 'sensores/humedad']
-                    }));
-                };
+                const statusEl = document.getElementById('connectionStatus');
+                statusEl.textContent = 'Conectando...';
+                statusEl.classList.remove('connected');
+                statusEl.classList.add('disconnected');
 
-                ws.onclose = function() {
-                    const statusEl = document.getElementById('connectionStatus');
-                    statusEl.textContent = 'Desconectado';
-                    statusEl.classList.remove('connected');
-                    statusEl.classList.add('disconnected');
+                // Conectar
+                logDebug(`Conectando a ${host}:${port} con ID ${clientId}...`);
+                client.connect({
+                    useSSL: port === "8884",
+                    userName: username,
+                    password: password,
+                    onSuccess: function() {
+                        isConnected = true;
+                        logDebug("¡Conexión exitosa!");
+                        statusEl.textContent = 'Conectado';
+                        statusEl.classList.remove('disconnected');
+                        statusEl.classList.add('connected');
 
-                    // Intento de reconexión después de 5 segundos
-                    setTimeout(() => {
-                        connectWebSocket(url, username, password);
-                    }, 5000);
-                };
-
-                ws.onerror = function(error) {
-                    console.error('Error en WebSocket:', error);
-                    const statusEl = document.getElementById('connectionStatus');
-                    statusEl.textContent = 'Error de conexión';
-                    statusEl.classList.remove('connected');
-                    statusEl.classList.add('disconnected');
-                };
-
-                ws.onmessage = function(event) {
-                    try {
-                        const data = JSON.parse(event.data);
-                        console.log('Datos recibidos:', data); // Agrega este console.log para verificar los datos recibidos
-                        if (data.topic === 'sensores/temperatura') {
-                            updateGauge('temperature', data.payload.temperature);
-                            updateChart('temperature', data.payload.temperature, data.payload.timestamp);
-                        } else if (data.topic === 'sensores/humedad') {
-                            updateGauge('humidity', data.payload.humidity);
-                            updateChart('humidity', data.payload.humidity, data.payload.timestamp);
-                        }
-                    } catch (e) {
-                        console.error('Error al procesar los datos:', e);
+                        // Suscribirse a los temas
+                        logDebug(`Suscribiendo a: ${tempTopic}, ${humTopic}`);
+                        client.subscribe(tempTopic);
+                        client.subscribe(humTopic);
+                    },
+                    onFailure: function(e) {
+                        logDebug("Error de conexión: " + e.errorMessage);
+                        statusEl.textContent = 'Error: ' + e.errorMessage;
+                        statusEl.classList.remove('connected');
+                        statusEl.classList.add('disconnected');
                     }
-                };
+                });
             } catch (e) {
-                console.error('Error al crear WebSocket:', e);
+                logDebug("Error al inicializar conexión: " + e.message);
+            }
+        }
+
+        // Manejo de pérdida de conexión
+        function onConnectionLost(responseObject) {
+            isConnected = false;
+            const statusEl = document.getElementById('connectionStatus');
+            if (responseObject.errorCode !== 0) {
+                logDebug("Conexión perdida: " + responseObject.errorMessage);
+                statusEl.textContent = 'Desconectado: ' + responseObject.errorMessage;
+            } else {
+                logDebug("Desconectado normalmente");
+                statusEl.textContent = 'Desconectado';
+            }
+            statusEl.classList.remove('connected');
+            statusEl.classList.add('disconnected');
+
+            // Intento de reconexión después de 5 segundos
+            setTimeout(() => {
+                if (!isConnected) {
+                    const host = document.getElementById('host').value;
+                    const port = document.getElementById('port').value;
+                    const username = document.getElementById('username').value;
+                    const password = document.getElementById('password').value;
+                    const tempTopic = document.getElementById('tempTopic').value;
+                    const humTopic = document.getElementById('humTopic').value;
+                    connectMQTT(host, port, username, password, tempTopic, humTopic);
+                }
+            }, 5000);
+        }
+
+        // Manejo de mensajes recibidos
+        function onMessageArrived(message) {
+            const topic = message.destinationName;
+            const payload = message.payloadString;
+            logDebug(`Mensaje recibido en tema "${topic}": ${payload}`);
+
+            try {
+                // Intentar parsear como JSON
+                const data = JSON.parse(payload);
+                const tempTopic = document.getElementById('tempTopic').value;
+                const humTopic = document.getElementById('humTopic').value;
+
+                if (topic === tempTopic) {
+                    // Extracción de temperatura - intentar varios formatos posibles
+                    let temperature = null;
+                    if (typeof data === 'number') {
+                        temperature = data;
+                    } else if (data.temperature !== undefined) {
+                        temperature = data.temperature;
+                    } else if (data.temp !== undefined) {
+                        temperature = data.temp;
+                    } else if (data.value !== undefined) {
+                        temperature = data.value;
+                    } else if (data.payload && data.payload.temperature !== undefined) {
+                        temperature = data.payload.temperature;
+                    }
+
+                    if (temperature !== null) {
+                        // Si es un string, convertir a número
+                        if (typeof temperature === 'string') {
+                            temperature = parseFloat(temperature);
+                        }
+                        logDebug(`Temperatura actualizada: ${temperature}`);
+                        updateGauge('temperature', temperature);
+                        updateChart('temperature', temperature, new Date().getTime());
+                    }
+                } else if (topic === humTopic) {
+                    // Extracción de humedad - intentar varios formatos posibles
+                    let humidity = null;
+                    if (typeof data === 'number') {
+                        humidity = data;
+                    } else if (data.humidity !== undefined) {
+                        humidity = data.humidity;
+                    } else if (data.hum !== undefined) {
+                        humidity = data.hum;
+                    } else if (data.value !== undefined) {
+                        humidity = data.value;
+                    } else if (data.payload && data.payload.humidity !== undefined) {
+                        humidity = data.payload.humidity;
+                    }
+
+                    if (humidity !== null) {
+                        // Si es un string, convertir a número
+                        if (typeof humidity === 'string') {
+                            humidity = parseFloat(humidity);
+                        }
+                        logDebug(`Humedad actualizada: ${humidity}`);
+                        updateGauge('humidity', humidity);
+                        updateChart('humidity', humidity, new Date().getTime());
+                    }
+                }
+            } catch (e) {
+                // Si no es JSON, puede ser un valor simple
+                logDebug(`Error al procesar JSON: ${e.message}. Intentando como valor simple.`);
+                const tempTopic = document.getElementById('tempTopic').value;
+                const humTopic = document.getElementById('humTopic').value;
+                
+                try {
+                    const value = parseFloat(payload);
+                    if (!isNaN(value)) {
+                        if (topic === tempTopic) {
+                            updateGauge('temperature', value);
+                            updateChart('temperature', value, new Date().getTime());
+                            logDebug(`Temperatura actualizada (valor simple): ${value}`);
+                        } else if (topic === humTopic) {
+                            updateGauge('humidity', value);
+                            updateChart('humidity', value, new Date().getTime());
+                            logDebug(`Humedad actualizada (valor simple): ${value}`);
+                        }
+                    }
+                } catch (e2) {
+                    logDebug(`No se pudo procesar el valor: ${e2.message}`);
+                }
             }
         }
 
@@ -354,17 +486,16 @@
 
             // Manejar conexión
             document.getElementById('connectBtn').addEventListener('click', function() {
-                const url = document.getElementById('wsUrl').value;
-                const username = document.getElementById('wsUsername').value;
-                const password = document.getElementById('wsPassword').value;
-                connectWebSocket(url, username, password);
+                const host = document.getElementById('host').value;
+                const port = document.getElementById('port').value;
+                const username = document.getElementById('username').value;
+                const password = document.getElementById('password').value;
+                const tempTopic = document.getElementById('tempTopic').value;
+                const humTopic = document.getElementById('humTopic').value;
+                connectMQTT(host, port, username, password, tempTopic, humTopic);
             });
 
-            // Autoconectar con la URL predeterminada
-            const defaultUrl = document.getElementById('wsUrl').value;
-            const defaultUsername = document.getElementById('wsUsername').value;
-            const defaultPassword = document.getElementById('wsPassword').value;
-            connectWebSocket(defaultUrl, defaultUsername, defaultPassword);
+            logDebug("Aplicación inicializada. Lista para conectar.");
         });
     </script>
 </body>
