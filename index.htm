@@ -227,13 +227,13 @@
             };
 
             const humOptions = {
-                angle: 0.5,
-                lineWidth: 0.44,
-                radiusScale: 1,
+                angle: 0.0,  // Completamente circular
+                lineWidth: 0.3,  // Línea más delgada para un aspecto más elegante
+                radiusScale: 0.9,  // Un poco más pequeño para que se vea más redondo
                 pointer: {
-                    length: 0.6,
+                    length: 0.5,  // Puntero más corto
                     strokeWidth: 0.035,
-                    color: '#ffffff'
+                    color: '#2196F3'  // Puntero azul
                 },
                 limitMax: true,
                 limitMin: true,
@@ -242,6 +242,22 @@
                 strokeColor: '#E0E0E0',
                 generateGradient: true,
                 highDpiSupport: true,
+                renderTicks: {
+                    divisions: 10,
+                    divWidth: 1.1,
+                    divLength: 0.7,
+                    divColor: '#2196F3',
+                    subDivisions: 5,
+                    subLength: 0.5,
+                    subWidth: 0.6,
+                    subColor: '#66B2FF'
+                },
+                staticLabels: {
+                    font: "12px sans-serif",
+                    labels: [0, 20, 40, 60, 80, 100],
+                    color: "#2196F3",
+                    fractionDigits: 0
+                },
                 staticZones: [
                     {strokeStyle: "#2196F3", min: 0, max: 100}
                 ],
