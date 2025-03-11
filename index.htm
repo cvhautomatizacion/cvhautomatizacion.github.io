@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
     <title>Monitor de Sensores IoT</title>
-    <!-- Bibliotecas necesarias -->
-    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://bernii.github.io/gauge.js/dist/gauge.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&display=swap" rel="stylesheet">
@@ -83,12 +83,19 @@
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
 
-        .chart-container {
+        .charts-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .chart-card {
             background-color: var(--card-background);
             padding: 20px;
             border-radius: 10px;
-            margin-top: 20px;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            height: 300px;
         }
 
         input {
@@ -123,6 +130,14 @@
         canvas {
             max-width: 100%;
         }
+
+        .temp-value {
+            color: #F03E3E;
+        }
+
+        .hum-value {
+            color: var(--primary-color);
+        }
     </style>
 </head>
 <body>
@@ -135,8 +150,8 @@
             <div class="connection-form">
                 <input type="text" id="username" placeholder="Usuario HiveMQ">
                 <input type="password" id="password" placeholder="Contraseña HiveMQ">
-                <button onclick="conectar()">Conectar</button>
-                <button onclick="desconectar()">Desconectar</button>
+                <button id="btnConectar">Conectar</button>
+                <button id="btnDesconectar">Desconectar</button>
             </div>
             <div id="connection-status" class="connection-status status-disconnected">
                 Desconectado
@@ -147,17 +162,22 @@
             <div class="gauge-card">
                 <h2>Temperatura</h2>
                 <canvas id="gauge-temp"></canvas>
-                <div id="temp-value" class="value-display">-- °C</div>
+                <div id="temp-value" class="value-display temp-value">-- °C</div>
             </div>
             <div class="gauge-card">
                 <h2>Humedad</h2>
                 <canvas id="gauge-hum"></canvas>
-                <div id="hum-value" class="value-display">-- %</div>
+                <div id="hum-value" class="value-display hum-value">-- %</div>
             </div>
         </div>
 
-        <div class="chart-container">
-            <canvas id="history-chart"></canvas>
+        <div class="charts-container">
+            <div class="chart-card">
+                <canvas id="temp-chart"></canvas>
+            </div>
+            <div class="chart-card">
+                <canvas id="hum-chart"></canvas>
+            </div>
         </div>
     </div>
 
@@ -165,7 +185,7 @@
         // Variables globales
         let client = null;
         let tempGauge, humGauge;
-        let historyChart;
+        let tempChart, humChart;
         const maxDataPoints = 20;
         const historicalData = {
             labels: [],
@@ -173,10 +193,18 @@
             humidity: []
         };
 
-        // Inicializar gauges
+        // Función para actualizar el estado de conexión
+        function updateStatus(message, isError = false) {
+            const status = document.getElementById('connection-status');
+            status.textContent = message;
+            status.className = 'connection-status ' + (isError ? 'status-disconnected' : 'status-connected');
+            console.log(message);
+        }
+
+        // Inicializar medidores
         function initGauges() {
-            const gaugeOptions = {
-                angle: 0,
+            const tempOptions = {
+                angle: 0.15,
                 lineWidth: 0.44,
                 radiusScale: 1,
                 pointer: {
@@ -186,8 +214,8 @@
                 },
                 limitMax: true,
                 limitMin: true,
-                colorStart: '#6FADCF',
-                colorStop: '#8FC0DA',
+                colorStart: '#F03E3E',
+                colorStop: '#F03E3E',
                 strokeColor: '#E0E0E0',
                 generateGradient: true,
                 highDpiSupport: true,
@@ -198,8 +226,29 @@
                 ],
             };
 
-            tempGauge = new Gauge(document.getElementById('gauge-temp')).setOptions(gaugeOptions);
-            humGauge = new Gauge(document.getElementById('gauge-hum')).setOptions(gaugeOptions);
+            const humOptions = {
+                angle: 0.5,
+                lineWidth: 0.44,
+                radiusScale: 1,
+                pointer: {
+                    length: 0.6,
+                    strokeWidth: 0.035,
+                    color: '#ffffff'
+                },
+                limitMax: true,
+                limitMin: true,
+                colorStart: '#2196F3',
+                colorStop: '#2196F3',
+                strokeColor: '#E0E0E0',
+                generateGradient: true,
+                highDpiSupport: true,
+                staticZones: [
+                    {strokeStyle: "#2196F3", min: 0, max: 100}
+                ],
+            };
+
+            tempGauge = new Gauge(document.getElementById('gauge-temp')).setOptions(tempOptions);
+            humGauge = new Gauge(document.getElementById('gauge-hum')).setOptions(humOptions);
 
             tempGauge.maxValue = 100;
             tempGauge.setMinValue(0);
@@ -210,62 +259,74 @@
             humGauge.set(0);
         }
 
-        // Inicializar gráfico
-        function initChart() {
-            const ctx = document.getElementById('history-chart').getContext('2d');
-            historyChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'Temperatura (°C)',
-                            borderColor: '#F03E3E',
-                            data: [],
-                            tension: 0.4
+        // Inicializar gráficos
+        function initCharts() {
+            const commonOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.1)'
                         },
-                        {
-                            label: 'Humedad (%)',
-                            borderColor: '#30B32D',
-                            data: [],
-                            tension: 0.4
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            grid: {
-                                color: 'rgba(255, 255, 255, 0.1)'
-                            },
-                            ticks: {
-                                color: '#ffffff'
-                            }
-                        },
-                        x: {
-                            grid: {
-                                color: 'rgba(255, 255, 255, 0.1)'
-                            },
-                            ticks: {
-                                color: '#ffffff'
-                            }
+                        ticks: {
+                            color: '#ffffff'
                         }
                     },
-                    plugins: {
-                        legend: {
-                            labels: {
-                                color: '#ffffff'
-                            }
+                    x: {
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.1)'
+                        },
+                        ticks: {
+                            color: '#ffffff'
+                        }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        labels: {
+                            color: '#ffffff'
                         }
                     }
                 }
+            };
+
+            tempChart = new Chart(document.getElementById('temp-chart').getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Temperatura (°C)',
+                        borderColor: '#F03E3E',
+                        data: [],
+                        tension: 0.4,
+                        fill: true,
+                        backgroundColor: 'rgba(240, 62, 62, 0.1)'
+                    }]
+                },
+                options: commonOptions
+            });
+
+            humChart = new Chart(document.getElementById('hum-chart').getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Humedad (%)',
+                        borderColor: '#2196F3',
+                        data: [],
+                        tension: 0.4,
+                        fill: true,
+                        backgroundColor: 'rgba(33, 150, 243, 0.1)'
+                    }]
+                },
+                options: commonOptions
             });
         }
 
-        function updateChart(type, value) {
+        // Actualizar gráficos
+        function updateCharts(type, value) {
             const now = new Date();
             const timeStr = now.toLocaleTimeString();
 
@@ -281,16 +342,18 @@
 
             if (type === 'temperature') {
                 historicalData.temperature.push(value);
+                tempChart.data.labels = historicalData.labels;
+                tempChart.data.datasets[0].data = historicalData.temperature;
+                tempChart.update();
             } else {
                 historicalData.humidity.push(value);
+                humChart.data.labels = historicalData.labels;
+                humChart.data.datasets[0].data = historicalData.humidity;
+                humChart.update();
             }
-
-            historyChart.data.labels = historicalData.labels;
-            historyChart.data.datasets[0].data = historicalData.temperature;
-            historyChart.data.datasets[1].data = historicalData.humidity;
-            historyChart.update();
         }
 
+        // Función para conectar al broker MQTT
         function conectar() {
             if (client) {
                 client.end();
@@ -299,70 +362,101 @@
             const username = document.getElementById('username').value;
             const password = document.getElementById('password').value;
 
-            const options = {
-                protocol: 'wss',
-                hostname: '280b4923bd19408a8100f249fb7b2fdb.s1.eu.hivemq.cloud',
-                port: 8884,
-                path: '/mqtt',
-                username: username,
-                password: password,
-                clientId: 'mqttjs_' + Math.random().toString(16).substr(2, 8)
-            };
+            if (!username || !password) {
+                updateStatus('Error: Usuario y contraseña son requeridos', true);
+                return;
+            }
+
+            updateStatus('Conectando...');
 
             try {
-                const url = `wss://${options.hostname}:${options.port}${options.path}`;
-                client = mqtt.connect(url, options);
+                client = mqtt.connect('wss://280b4923bd19408a8100f249fb7b2fdb.s1.eu.hivemq.cloud:8884/mqtt', {
+                    username: username,
+                    password: password,
+                    clientId: 'mqttjs_' + Math.random().toString(16).substr(2, 8),
+                    keepalive: 60,
+                    clean: true,
+                    reconnectPeriod: 1000,
+                    connectTimeout: 30 * 1000
+                });
 
                 client.on('connect', function() {
-                    document.getElementById('connection-status').textContent = 'Conectado';
-                    document.getElementById('connection-status').className = 'connection-status status-connected';
+                    updateStatus('Conectado');
+                    console.log('Conectado exitosamente a HiveMQ');
 
-                    client.subscribe('sensores/temperatura');
-                    client.subscribe('sensores/humedad');
+                    client.subscribe(['sensores/temperatura', 'sensores/humedad'], function(err) {
+                        if (err) {
+                            console.error('Error al suscribirse:', err);
+                            updateStatus('Error al suscribirse: ' + err.message, true);
+                        } else {
+                            console.log('Suscrito a los temas de sensores');
+                        }
+                    });
                 });
 
                 client.on('message', function(topic, message) {
+                    console.log('Mensaje recibido en', topic + ':', message.toString());
                     const value = parseFloat(message.toString());
                     
+                    if (isNaN(value)) {
+                        console.error('Valor no numérico recibido:', message.toString());
+                        return;
+                    }
+
                     if (topic === 'sensores/temperatura') {
                         tempGauge.set(value);
                         document.getElementById('temp-value').textContent = value.toFixed(1) + ' °C';
-                        updateChart('temperature', value);
+                        updateCharts('temperature', value);
                     } else if (topic === 'sensores/humedad') {
                         humGauge.set(value);
                         document.getElementById('hum-value').textContent = value.toFixed(1) + ' %';
-                        updateChart('humidity', value);
+                        updateCharts('humidity', value);
                     }
                 });
 
                 client.on('error', function(error) {
-                    document.getElementById('connection-status').textContent = 'Error: ' + error.message;
-                    document.getElementById('connection-status').className = 'connection-status status-disconnected';
+                    console.error('Error MQTT:', error);
+                    updateStatus('Error: ' + error.message, true);
                 });
 
                 client.on('close', function() {
-                    document.getElementById('connection-status').textContent = 'Desconectado';
-                    document.getElementById('connection-status').className = 'connection-status status-disconnected';
+                    console.log('Conexión cerrada');
+                    updateStatus('Desconectado', true);
+                });
+
+                client.on('offline', function() {
+                    console.log('Cliente desconectado');
+                    updateStatus('Desconectado - Intentando reconectar...', true);
+                });
+
+                client.on('reconnect', function() {
+                    console.log('Intentando reconexión...');
+                    updateStatus('Reconectando...', true);
                 });
 
             } catch (error) {
-                document.getElementById('connection-status').textContent = 'Error: ' + error.message;
-                document.getElementById('connection-status').className = 'connection-status status-disconnected';
+                console.error('Error al conectar:', error);
+                updateStatus('Error al conectar: ' + error.message, true);
             }
         }
 
+        // Función para desconectar
         function desconectar() {
             if (client) {
                 client.end();
-                document.getElementById('connection-status').textContent = 'Desconectado';
-                document.getElementById('connection-status').className = 'connection-status status-disconnected';
+                updateStatus('Desconectado', true);
+                console.log('Desconectado manualmente');
             }
         }
 
         // Inicializar todo cuando carga la página
         document.addEventListener('DOMContentLoaded', function() {
             initGauges();
-            initChart();
+            initCharts();
+            
+            // Agregar event listeners a los botones
+            document.getElementById('btnConectar').addEventListener('click', conectar);
+            document.getElementById('btnDesconectar').addEventListener('click', desconectar);
         });
     </script>
 </body>
