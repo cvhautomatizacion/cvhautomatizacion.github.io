@@ -108,6 +108,7 @@
         <label for="humTopic">Tema Humedad:</label>
         <input type="text" id="humTopic" value="sensores/humedad" style="width: 150px;">
         <button id="connectBtn">Conectar</button>
+        <button id="disconnectBtn">Desconectar</button>
     </div>
 
     <div id="connectionStatus" class="connection-status disconnected">
@@ -142,7 +143,7 @@
 
     <script>
         // Variables globales
-        let client;
+        let client = null;
         let temperatureGaugeChart;
         let humidityGaugeChart;
         let temperatureLineChart;
@@ -151,9 +152,11 @@
         let humidityHistory = [];
         const maxDataPoints = 30;
         let isConnected = false;
+        let reconnectTimeout = null;
 
         // Función para añadir mensajes de depuración
         function logDebug(message) {
+            console.log(message); // También lo mostramos en la consola para depuración
             const debugPanel = document.getElementById('debugPanel');
             const timestamp = new Date().toLocaleTimeString();
             debugPanel.textContent = `[${timestamp}] ${message}\n` + debugPanel.textContent;
@@ -215,167 +218,227 @@
             });
         }
 
-        // Conectar MQTT con la biblioteca Paho
-        function connectMQTT(host, port, username, password, tempTopic, humTopic) {
-            if (isConnected && client) {
-                client.disconnect();
-                isConnected = false;
-                logDebug("Desconectando cliente anterior...");
+        // Conectar al broker MQTT usando Paho
+        function connectMQTT() {
+            // Limpieza previa si hay una conexión existente
+            if (client && client.isConnected()) {
+                try {
+                    client.disconnect();
+                    logDebug("Cliente anterior desconectado");
+                } catch (e) {
+                    logDebug("Error al desconectar cliente anterior: " + e.message);
+                }
+            }
+            
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+                reconnectTimeout = null;
             }
 
+            // Obtener los parámetros de conexión
+            const host = document.getElementById('host').value;
+            const port = parseInt(document.getElementById('port').value);
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const useSSL = port === 8884;
+            
+            // Actualizar la UI
+            const statusEl = document.getElementById('connectionStatus');
+            statusEl.textContent = 'Conectando...';
+            statusEl.classList.remove('connected');
+            statusEl.classList.add('disconnected');
+            
             try {
-                const clientId = "dashboard_" + Math.random().toString(16).substr(2, 8);
-                client = new Paho.MQTT.Client(host, Number(port), clientId);
-
+                // Generar un ID de cliente único
+                const clientId = "mqttjs_" + Math.random().toString(16).substr(2, 8);
+                logDebug(`Intentando conectar a ${host}:${port} con ID ${clientId}`);
+                
+                // Crear un nuevo cliente Paho MQTT
+                client = new Paho.MQTT.Client(host, port, clientId);
+                
                 // Establecer callbacks
-                client.onConnectionLost = onConnectionLost;
-                client.onMessageArrived = onMessageArrived;
-
-                const statusEl = document.getElementById('connectionStatus');
-                statusEl.textContent = 'Conectando...';
-                statusEl.classList.remove('connected');
-                statusEl.classList.add('disconnected');
-
-                // Conectar
-                logDebug(`Conectando a ${host}:${port} con ID ${clientId}...`);
-                client.connect({
-                    useSSL: port === "8884",
-                    userName: username,
-                    password: password,
+                client.onConnectionLost = function(responseObject) {
+                    isConnected = false;
+                    if (responseObject.errorCode !== 0) {
+                        logDebug("Conexión perdida: " + responseObject.errorMessage);
+                        statusEl.textContent = 'Desconectado: ' + responseObject.errorMessage;
+                    } else {
+                        logDebug("Desconectado");
+                        statusEl.textContent = 'Desconectado';
+                    }
+                    statusEl.classList.remove('connected');
+                    statusEl.classList.add('disconnected');
+                    
+                    // Programar reconexión
+                    if (!reconnectTimeout) {
+                        reconnectTimeout = setTimeout(connectMQTT, 5000);
+                        logDebug("Intentando reconectar en 5 segundos...");
+                    }
+                };
+                
+                client.onMessageArrived = function(message) {
+                    const topic = message.destinationName;
+                    const payload = message.payloadString;
+                    logDebug(`Mensaje recibido en tema "${topic}": ${payload}`);
+                    
+                    try {
+                        // Intentar parsear como JSON
+                        const data = JSON.parse(payload);
+                        const tempTopic = document.getElementById('tempTopic').value;
+                        const humTopic = document.getElementById('humTopic').value;
+                        
+                        if (topic === tempTopic) {
+                            // Extracción de temperatura - intentar varios formatos posibles
+                            let temperature = null;
+                            if (typeof data === 'number') {
+                                temperature = data;
+                            } else if (data.temperature !== undefined) {
+                                temperature = data.temperature;
+                            } else if (data.temp !== undefined) {
+                                temperature = data.temp;
+                            } else if (data.value !== undefined) {
+                                temperature = data.value;
+                            } else if (data.payload && data.payload.temperature !== undefined) {
+                                temperature = data.payload.temperature;
+                            }
+                            
+                            if (temperature !== null) {
+                                // Si es un string, convertir a número
+                                if (typeof temperature === 'string') {
+                                    temperature = parseFloat(temperature);
+                                }
+                                logDebug(`Temperatura actualizada: ${temperature}`);
+                                updateGauge('temperature', temperature);
+                                updateChart('temperature', temperature, new Date().getTime());
+                            }
+                        } else if (topic === humTopic) {
+                            // Extracción de humedad - intentar varios formatos posibles
+                            let humidity = null;
+                            if (typeof data === 'number') {
+                                humidity = data;
+                            } else if (data.humidity !== undefined) {
+                                humidity = data.humidity;
+                            } else if (data.hum !== undefined) {
+                                humidity = data.hum;
+                            } else if (data.value !== undefined) {
+                                humidity = data.value;
+                            } else if (data.payload && data.payload.humidity !== undefined) {
+                                humidity = data.payload.humidity;
+                            }
+                            
+                            if (humidity !== null) {
+                                // Si es un string, convertir a número
+                                if (typeof humidity === 'string') {
+                                    humidity = parseFloat(humidity);
+                                }
+                                logDebug(`Humedad actualizada: ${humidity}`);
+                                updateGauge('humidity', humidity);
+                                updateChart('humidity', humidity, new Date().getTime());
+                            }
+                        }
+                    } catch (e) {
+                        // Si no es JSON, puede ser un valor simple
+                        logDebug(`Error al procesar JSON: ${e.message}. Intentando como valor simple.`);
+                        const tempTopic = document.getElementById('tempTopic').value;
+                        const humTopic = document.getElementById('humTopic').value;
+                        
+                        try {
+                            const value = parseFloat(payload);
+                            if (!isNaN(value)) {
+                                if (topic === tempTopic) {
+                                    updateGauge('temperature', value);
+                                    updateChart('temperature', value, new Date().getTime());
+                                    logDebug(`Temperatura actualizada (valor simple): ${value}`);
+                                } else if (topic === humTopic) {
+                                    updateGauge('humidity', value);
+                                    updateChart('humidity', value, new Date().getTime());
+                                    logDebug(`Humedad actualizada (valor simple): ${value}`);
+                                }
+                            }
+                        } catch (e2) {
+                            logDebug(`No se pudo procesar el valor: ${e2.message}`);
+                        }
+                    }
+                };
+                
+                // Opciones de conexión
+                const options = {
+                    timeout: 3,
+                    useSSL: useSSL,
                     onSuccess: function() {
                         isConnected = true;
                         logDebug("¡Conexión exitosa!");
                         statusEl.textContent = 'Conectado';
                         statusEl.classList.remove('disconnected');
                         statusEl.classList.add('connected');
-
-                        // Suscribirse a los temas
-                        logDebug(`Suscribiendo a: ${tempTopic}, ${humTopic}`);
-                        client.subscribe(tempTopic);
-                        client.subscribe(humTopic);
+                        
+                        // Suscribirse a temas
+                        const tempTopic = document.getElementById('tempTopic').value;
+                        const humTopic = document.getElementById('humTopic').value;
+                        
+                        try {
+                            logDebug(`Suscribiendo a tema: ${tempTopic}`);
+                            client.subscribe(tempTopic);
+                            
+                            logDebug(`Suscribiendo a tema: ${humTopic}`);
+                            client.subscribe(humTopic);
+                        } catch (e) {
+                            logDebug("Error al suscribirse: " + e.message);
+                        }
                     },
                     onFailure: function(e) {
+                        isConnected = false;
                         logDebug("Error de conexión: " + e.errorMessage);
                         statusEl.textContent = 'Error: ' + e.errorMessage;
                         statusEl.classList.remove('connected');
                         statusEl.classList.add('disconnected');
-                    }
-                });
-            } catch (e) {
-                logDebug("Error al inicializar conexión: " + e.message);
-            }
-        }
-
-        // Manejo de pérdida de conexión
-        function onConnectionLost(responseObject) {
-            isConnected = false;
-            const statusEl = document.getElementById('connectionStatus');
-            if (responseObject.errorCode !== 0) {
-                logDebug("Conexión perdida: " + responseObject.errorMessage);
-                statusEl.textContent = 'Desconectado: ' + responseObject.errorMessage;
-            } else {
-                logDebug("Desconectado normalmente");
-                statusEl.textContent = 'Desconectado';
-            }
-            statusEl.classList.remove('connected');
-            statusEl.classList.add('disconnected');
-
-            // Intento de reconexión después de 5 segundos
-            setTimeout(() => {
-                if (!isConnected) {
-                    const host = document.getElementById('host').value;
-                    const port = document.getElementById('port').value;
-                    const username = document.getElementById('username').value;
-                    const password = document.getElementById('password').value;
-                    const tempTopic = document.getElementById('tempTopic').value;
-                    const humTopic = document.getElementById('humTopic').value;
-                    connectMQTT(host, port, username, password, tempTopic, humTopic);
-                }
-            }, 5000);
-        }
-
-        // Manejo de mensajes recibidos
-        function onMessageArrived(message) {
-            const topic = message.destinationName;
-            const payload = message.payloadString;
-            logDebug(`Mensaje recibido en tema "${topic}": ${payload}`);
-
-            try {
-                // Intentar parsear como JSON
-                const data = JSON.parse(payload);
-                const tempTopic = document.getElementById('tempTopic').value;
-                const humTopic = document.getElementById('humTopic').value;
-
-                if (topic === tempTopic) {
-                    // Extracción de temperatura - intentar varios formatos posibles
-                    let temperature = null;
-                    if (typeof data === 'number') {
-                        temperature = data;
-                    } else if (data.temperature !== undefined) {
-                        temperature = data.temperature;
-                    } else if (data.temp !== undefined) {
-                        temperature = data.temp;
-                    } else if (data.value !== undefined) {
-                        temperature = data.value;
-                    } else if (data.payload && data.payload.temperature !== undefined) {
-                        temperature = data.payload.temperature;
-                    }
-
-                    if (temperature !== null) {
-                        // Si es un string, convertir a número
-                        if (typeof temperature === 'string') {
-                            temperature = parseFloat(temperature);
+                        
+                        // Programar reconexión
+                        if (!reconnectTimeout) {
+                            reconnectTimeout = setTimeout(connectMQTT, 5000);
+                            logDebug("Intentando reconectar en 5 segundos...");
                         }
-                        logDebug(`Temperatura actualizada: ${temperature}`);
-                        updateGauge('temperature', temperature);
-                        updateChart('temperature', temperature, new Date().getTime());
                     }
-                } else if (topic === humTopic) {
-                    // Extracción de humedad - intentar varios formatos posibles
-                    let humidity = null;
-                    if (typeof data === 'number') {
-                        humidity = data;
-                    } else if (data.humidity !== undefined) {
-                        humidity = data.humidity;
-                    } else if (data.hum !== undefined) {
-                        humidity = data.hum;
-                    } else if (data.value !== undefined) {
-                        humidity = data.value;
-                    } else if (data.payload && data.payload.humidity !== undefined) {
-                        humidity = data.payload.humidity;
-                    }
-
-                    if (humidity !== null) {
-                        // Si es un string, convertir a número
-                        if (typeof humidity === 'string') {
-                            humidity = parseFloat(humidity);
-                        }
-                        logDebug(`Humedad actualizada: ${humidity}`);
-                        updateGauge('humidity', humidity);
-                        updateChart('humidity', humidity, new Date().getTime());
-                    }
-                }
-            } catch (e) {
-                // Si no es JSON, puede ser un valor simple
-                logDebug(`Error al procesar JSON: ${e.message}. Intentando como valor simple.`);
-                const tempTopic = document.getElementById('tempTopic').value;
-                const humTopic = document.getElementById('humTopic').value;
+                };
                 
+                // Agregar credenciales si están presentes
+                if (username) {
+                    options.userName = username;
+                    options.password = password;
+                }
+                
+                // Conectar
+                client.connect(options);
+                
+            } catch (e) {
+                logDebug("Error al inicializar cliente MQTT: " + e.message);
+                // Programar reconexión
+                if (!reconnectTimeout) {
+                    reconnectTimeout = setTimeout(connectMQTT, 5000);
+                    logDebug("Intentando reconectar en 5 segundos...");
+                }
+            }
+        }
+        
+        // Función para desconectar MQTT
+        function disconnectMQTT() {
+            if (client && client.isConnected()) {
                 try {
-                    const value = parseFloat(payload);
-                    if (!isNaN(value)) {
-                        if (topic === tempTopic) {
-                            updateGauge('temperature', value);
-                            updateChart('temperature', value, new Date().getTime());
-                            logDebug(`Temperatura actualizada (valor simple): ${value}`);
-                        } else if (topic === humTopic) {
-                            updateGauge('humidity', value);
-                            updateChart('humidity', value, new Date().getTime());
-                            logDebug(`Humedad actualizada (valor simple): ${value}`);
-                        }
+                    client.disconnect();
+                    isConnected = false;
+                    logDebug("Desconectado manualmente");
+                    
+                    const statusEl = document.getElementById('connectionStatus');
+                    statusEl.textContent = 'Desconectado manualmente';
+                    statusEl.classList.remove('connected');
+                    statusEl.classList.add('disconnected');
+                    
+                    if (reconnectTimeout) {
+                        clearTimeout(reconnectTimeout);
+                        reconnectTimeout = null;
                     }
-                } catch (e2) {
-                    logDebug(`No se pudo procesar el valor: ${e2.message}`);
+                } catch (e) {
+                    logDebug("Error al desconectar: " + e.message);
                 }
             }
         }
@@ -415,6 +478,7 @@
 
         // Inicializar la aplicación
         document.addEventListener('DOMContentLoaded', function() {
+            // Inicializar gráficos
             temperatureGaugeChart = initGauge('temperatureGauge', {
                 angle: 0,
                 lineWidth: 0.3,
@@ -484,18 +548,11 @@
             temperatureLineChart = initLineChart(document.getElementById('temperatureChart').getContext('2d'), 'Temperatura (°C)', 'rgb(255, 99, 132)');
             humidityLineChart = initLineChart(document.getElementById('humidityChart').getContext('2d'), 'Humedad (%)', 'rgb(54, 162, 235)');
 
-            // Manejar conexión
-            document.getElementById('connectBtn').addEventListener('click', function() {
-                const host = document.getElementById('host').value;
-                const port = document.getElementById('port').value;
-                const username = document.getElementById('username').value;
-                const password = document.getElementById('password').value;
-                const tempTopic = document.getElementById('tempTopic').value;
-                const humTopic = document.getElementById('humTopic').value;
-                connectMQTT(host, port, username, password, tempTopic, humTopic);
-            });
+            // Manejar eventos de botones
+            document.getElementById('connectBtn').addEventListener('click', connectMQTT);
+            document.getElementById('disconnectBtn').addEventListener('click', disconnectMQTT);
 
-            logDebug("Aplicación inicializada. Lista para conectar.");
+            logDebug("Aplicación inicializada. Pulse 'Conectar' para iniciar la conexión MQTT.");
         });
     </script>
 </body>
